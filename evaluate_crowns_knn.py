@@ -310,7 +310,7 @@ def evaluate_crowns_knn(
 if __name__ == "__main__":
     evaluate_crowns_knn(
         train_ratio=0.8,
-        seed=42,
+        seed=67,
         evaluate_on_test_only=True,
         k=1
     )

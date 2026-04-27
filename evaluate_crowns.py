@@ -13,11 +13,12 @@ except (ModuleNotFoundError, ImportError):
 
 from ground_truth_progress import GROUND_TRUTH
 from image_processing import get_tiles, predict_terrain_grid_from_image
-#from crown_detection import build_crown_grid
-from knn_crown_detection import build_crown_knn_database, build_crown_grid_knn
+from crown_detection import build_crown_grid
+
 GRID_SIZE = 5
 BOARD_SIZE = 500
 DATASET_FOLDER = "king_domino_dataset"
+
 
 def get_image_files(dataset_folder):
     valid_extensions = (".jpg", ".jpeg", ".png", ".bmp")

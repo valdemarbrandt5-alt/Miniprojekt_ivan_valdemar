@@ -1,15 +1,11 @@
 def find_neighbors(x, y, rows, cols):
-    """
-    Returnerer gyldige naboer i de 4 hovedretninger:
-    op, ned, venstre, højre.
-    """
     neighbors = []
 
     directions = [
-        (-1, 0),  # op
-        (1, 0),   # ned
-        (0, -1),  # venstre
-        (0, 1)    # højre
+        (-1, 0),
+        (1, 0),
+        (0, -1),
+        (0, 1)
     ]
 
     for dx, dy in directions:
@@ -23,10 +19,6 @@ def find_neighbors(x, y, rows, cols):
 
 
 def dfs(terrain_grid, x, y, terrain_type, visited):
-    """
-    DFS der finder ét sammenhængende område af samme terræntype.
-    Returnerer en liste af koordinater i clusteren.
-    """
     rows = len(terrain_grid)
     cols = len(terrain_grid[0])
 
@@ -55,16 +47,6 @@ def dfs(terrain_grid, x, y, terrain_type, visited):
 
 
 def find_clusters(terrain_grid):
-    """
-    Finder alle sammenhængende områder i terrain_grid.
-
-    Input:
-        terrain_grid: 2D liste, fx 5x5 med terrain labels
-
-    Returnerer:
-        clusters: liste af tuples på formen
-                  (terrain_type, [(x1, y1), (x2, y2), ...])
-    """
     if not terrain_grid or not terrain_grid[0]:
         return []
 
@@ -84,24 +66,105 @@ def find_clusters(terrain_grid):
     return clusters
 
 
+def calculate_cluster_score(
+    cluster,
+    crown_grid,
+    zero_crowns_count_as_one=False
+):
+    area_size = len(cluster)
+
+    crown_count = 0
+    for x, y in cluster:
+        crown_count += crown_grid[y][x]
+
+    if zero_crowns_count_as_one and crown_count == 0:
+        score = area_size
+    else:
+        score = area_size * crown_count
+
+    return score, area_size, crown_count
+
+
+def calculate_board_score(
+    terrain_grid,
+    crown_grid,
+    ignore_terrain_types=None,
+    zero_crowns_count_as_one=False
+):
+    if ignore_terrain_types is None:
+        ignore_terrain_types = {"Home", "Empty"}
+
+    clusters = find_clusters(terrain_grid)
+
+    total_score = 0
+    score_breakdown = []
+
+    for terrain_type, cluster in clusters:
+        if terrain_type in ignore_terrain_types:
+            continue
+
+        cluster_score, area_size, crown_count = calculate_cluster_score(
+            cluster,
+            crown_grid,
+            zero_crowns_count_as_one=zero_crowns_count_as_one
+        )
+
+        total_score += cluster_score
+
+        score_breakdown.append({
+            "terrain": terrain_type,
+            "cells": cluster,
+            "area_size": area_size,
+            "crowns": crown_count,
+            "score": cluster_score
+        })
+
+    return total_score, score_breakdown
+
+
 def print_clusters(clusters):
-    """
-    Printer clusters på en pæn måde.
-    """
     print("\nSammenhængende områder:")
     for terrain, cluster in clusters:
         print(f"{terrain}: {len(cluster)} felter -> {cluster}")
 
 
+def print_score_breakdown(total_score, score_breakdown):
+    print("\nPointberegning:")
+    print("=" * 50)
+
+    for item in score_breakdown:
+        print(
+            f"{item['terrain']}: "
+            f"{item['area_size']} felter × "
+            f"{item['crowns']} kroner = "
+            f"{item['score']} point"
+        )
+
+    print("=" * 50)
+    print(f"Samlet score: {total_score}")
+
+
 if __name__ == "__main__":
-    # Lille test eksempel
-    test_grid = [
-        ["Forest", "Forest", "Lake", "Field", "Field"],
-        ["Forest", "Grassland", "Lake", "Field", "Mine"],
-        ["Grassland", "Grassland", "Lake", "Mine", "Mine"],
-        ["Swamp", "Grassland", "Home", "Home", "Mine"],
-        ["Swamp", "Swamp", "Home", "Field", "Field"]
+    terrain_grid = [
+        ["Grass", "Lake", "Forest", "Forest", "Forest"],
+        ["Grass", "Forest", "Forest", "Forest", "Grass"],
+        ["Grass", "Swamp", "Home", "Forest", "Grass"],
+        ["Grass", "Swamp", "Lake", "Grass", "Grass"],
+        ["Forest", "Lake", "Lake", "Grass", "Field"]
     ]
 
-    clusters = find_clusters(test_grid)
-    print_clusters(clusters)
+    crown_grid = [
+        [0, 0, 0, 0, 0],
+        [0, 0, 0, 1, 0],
+        [0, 1, 0, 0, 0],
+        [0, 2, 0, 2, 1],
+        [0, 1, 0, 1, 0]
+    ]
+
+    total_score, breakdown = calculate_board_score(
+        terrain_grid,
+        crown_grid,
+        zero_crowns_count_as_one=False
+    )
+
+    print_score_breakdown(total_score, breakdown)
