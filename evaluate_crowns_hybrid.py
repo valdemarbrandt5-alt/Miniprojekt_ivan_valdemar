@@ -13,11 +13,14 @@ except (ModuleNotFoundError, ImportError):
 
 from ground_truth_progress import GROUND_TRUTH
 from image_processing import get_tiles, predict_terrain_grid_from_image
-#from crown_detection import build_crown_grid
-from knn_crown_detection import build_crown_knn_database, build_crown_grid_knn
+from crown_knn_detection import build_crown_knn_database
+from crown_hybrid_detection import build_crown_grid_hybrid
+
+
 GRID_SIZE = 5
 BOARD_SIZE = 500
 DATASET_FOLDER = "king_domino_dataset"
+
 
 def get_image_files(dataset_folder):
     valid_extensions = (".jpg", ".jpeg", ".png", ".bmp")
@@ -28,8 +31,11 @@ def get_image_files(dataset_folder):
     ]
 
     image_files.sort(
-        key=lambda x: int(os.path.splitext(x)[0]) if os.path.splitext(x)[0].isdigit() else x
+        key=lambda x: int(os.path.splitext(x)[0])
+        if os.path.splitext(x)[0].isdigit()
+        else x
     )
+
     return image_files
 
 
@@ -65,15 +71,11 @@ def compare_crown_grids(predicted_grid, true_grid, confusion):
                 mistakes.append((row, col, truth, predicted))
 
     accuracy = correct / total if total > 0 else 0.0
+
     return correct, total, accuracy, mistakes
 
 
 def visualize_test_boards_with_crowns(test_results, board_size=500, grid_size=5):
-    """
-    Viser boards med predicted crowns ovenpå.
-    Grøn kant = korrekt
-    Rød kant = forkert
-    """
     if not test_results:
         print("Ingen test results at visualisere.")
         return
@@ -114,8 +116,7 @@ def visualize_test_boards_with_crowns(test_results, board_size=500, grid_size=5)
                 predicted = predicted_grid[row][col]
                 truth = true_grid[row][col]
 
-                is_correct = predicted == truth
-                edge_color = "lime" if is_correct else "red"
+                edge_color = "lime" if predicted == truth else "red"
 
                 rect = patches.Rectangle(
                     (x, y),
@@ -127,12 +128,10 @@ def visualize_test_boards_with_crowns(test_results, board_size=500, grid_size=5)
                 )
                 ax.add_patch(rect)
 
-                text = f"P:{predicted} T:{truth}"
-
                 ax.text(
                     x + 4,
                     y + 18,
-                    text,
+                    f"P:{predicted} T:{truth}",
                     color="white",
                     fontsize=8,
                     weight="bold",
@@ -146,14 +145,15 @@ def visualize_test_boards_with_crowns(test_results, board_size=500, grid_size=5)
     plt.show()
 
 
-def evaluate_crowns(
+def evaluate_crowns_hybrid(
     train_ratio=0.8,
     seed=42,
     evaluate_on_test_only=True,
-    threshold=0.85,
-    iou_threshold=0.20,
-    min_center_distance=12,
+    k=1,
+    template_threshold=0.85,
     strong_score_threshold=0.90,
+    iou_threshold=0.20,
+    min_center_distance=10,
     max_crowns=3,
     debug=False,
     home_template_threshold=0.80,
@@ -171,19 +171,33 @@ def evaluate_crowns(
         print("Ingen billeder fundet i dataset mappen.")
         return
 
-    train_files, test_files = split_dataset(image_files, train_ratio=train_ratio, seed=seed)
+    train_files, test_files = split_dataset(
+        image_files,
+        train_ratio=train_ratio,
+        seed=seed
+    )
 
     print("=" * 70)
-    print("Evaluering af crown model")
+    print("Evaluering af crown model med HYBRID KNN + Template Matching")
     print("=" * 70)
     print(f"Seed: {seed}")
+    print(f"K: {k}")
     print(f"Train boards: {len(train_files)}")
     print(f"Test boards: {len(test_files)}")
-    print(f"Threshold: {threshold}")
+    print(f"Template threshold: {template_threshold}")
+    print(f"Strong score threshold: {strong_score_threshold}")
     print(f"IOU threshold: {iou_threshold}")
     print(f"Min center distance: {min_center_distance}")
-    print(f"Strong score threshold: {strong_score_threshold}")
     print(f"Max crowns per tile: {max_crowns}")
+
+    print("\nBygger KNN database fra train split...")
+    database_features, database_labels = build_crown_knn_database(train_files)
+
+    print(f"Antal train tiles i database: {len(database_labels)}")
+
+    if len(database_labels) == 0:
+        print("KNN databasen er tom. Tjek dataset, train split og ground truth.")
+        return
 
     if evaluate_on_test_only:
         files_to_evaluate = test_files
@@ -213,7 +227,11 @@ def evaluate_crowns(
             print(f"Kunne ikke læse billede: {image_path}")
             continue
 
-        tiles = get_tiles(image, board_size=BOARD_SIZE, grid_size=GRID_SIZE)
+        tiles = get_tiles(
+            image,
+            board_size=BOARD_SIZE,
+            grid_size=GRID_SIZE
+        )
 
         terrain_grid = predict_terrain_grid_from_image(
             image=image,
@@ -226,13 +244,16 @@ def evaluate_crowns(
             hsv_weight=hsv_weight
         )
 
-        predicted_grid = build_crown_grid(
-            tiles,
+        predicted_grid = build_crown_grid_hybrid(
+            tiles=tiles,
+            database_features=database_features,
+            database_labels=database_labels,
             terrain_grid=terrain_grid,
-            threshold=threshold,
+            k=k,
+            template_threshold=template_threshold,
+            strong_score_threshold=strong_score_threshold,
             iou_threshold=iou_threshold,
             min_center_distance=min_center_distance,
-            strong_score_threshold=strong_score_threshold,
             max_crowns=max_crowns,
             debug=debug
         )
@@ -247,7 +268,11 @@ def evaluate_crowns(
             "terrain_grid": terrain_grid
         })
 
-        correct, total, accuracy, mistakes = compare_crown_grids(predicted_grid, true_grid, confusion)
+        correct, total, accuracy, mistakes = compare_crown_grids(
+            predicted_grid,
+            true_grid,
+            confusion
+        )
 
         total_correct += correct
         total_tiles += total
@@ -280,22 +305,32 @@ def evaluate_crowns(
     print("Confusion Matrix")
     print("=" * 70)
 
-    labels = sorted(set(confusion.keys()) | {pred for row in confusion.values() for pred in row.keys()})
+    labels = sorted(
+        set(confusion.keys()) |
+        {pred for row in confusion.values() for pred in row.keys()}
+    )
 
     matrix = []
+
     for true_label in labels:
-        row = []
+        matrix_row = []
+
         for pred_label in labels:
-            row.append(confusion[true_label].get(pred_label, 0))
-        matrix.append(row)
+            matrix_row.append(confusion[true_label].get(pred_label, 0))
+
+        matrix.append(matrix_row)
 
     if pd is not None:
         df = pd.DataFrame(matrix, index=labels, columns=labels)
         print(df)
     else:
         print("pandas kunne ikke importeres i dette miljø. Viser matrix som tekst:\n")
-        header = "true\\pred".ljust(12) + " ".join(str(label).ljust(8) for label in labels)
+
+        header = "true\\pred".ljust(12) + " ".join(
+            str(label).ljust(8) for label in labels
+        )
         print(header)
+
         for true_label, row in zip(labels, matrix):
             row_text = " ".join(str(value).ljust(8) for value in row)
             print(str(true_label).ljust(12) + row_text)
@@ -308,14 +343,15 @@ def evaluate_crowns(
 
 
 if __name__ == "__main__":
-    evaluate_crowns(
+    evaluate_crowns_hybrid(
         train_ratio=0.8,
         seed=42,
         evaluate_on_test_only=True,
-        threshold=0.85,
+        k=1,
+        template_threshold=0.85,
+        strong_score_threshold=0.90,
         iou_threshold=0.20,
         min_center_distance=10,
-        strong_score_threshold=0.90,
         max_crowns=3,
         debug=False,
         home_template_threshold=0.80,

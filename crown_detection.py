@@ -17,22 +17,15 @@ def preprocess_for_crowns(image):
 
 def crop_tile_center(tile, margin_ratio=0.06):
     h, w = tile.shape[:2]
-    margin_y = int(h * margin_ratio)
-    margin_x = int(w * margin_ratio)
-
-    y1 = margin_y
-    y2 = h - margin_y
-    x1 = margin_x
-    x2 = w - margin_x
-
-    return tile[y1:y2, x1:x2]
+    mx = int(w * margin_ratio)
+    my = int(h * margin_ratio)
+    return tile[my:h - my, mx:w - mx]
 
 
 def safe_imread(path):
     try:
         file_bytes = np.fromfile(path, dtype=np.uint8)
-        image = cv.imdecode(file_bytes, cv.IMREAD_COLOR)
-        return image
+        return cv.imdecode(file_bytes, cv.IMREAD_COLOR)
     except Exception:
         return None
 
@@ -41,16 +34,21 @@ def rotate_image(image, angle):
     h, w = image.shape[:2]
     center = (w / 2, h / 2)
     matrix = cv.getRotationMatrix2D(center, angle, 1.0)
-    rotated = cv.warpAffine(image, matrix, (w, h), flags=cv.INTER_LINEAR)
-    return rotated
+
+    return cv.warpAffine(
+        image,
+        matrix,
+        (w, h),
+        flags=cv.INTER_LINEAR,
+        borderMode=cv.BORDER_REPLICATE
+    )
 
 
 def resize_template(template_img, scale):
     h, w = template_img.shape[:2]
     new_w = max(5, int(w * scale))
     new_h = max(5, int(h * scale))
-    resized = cv.resize(template_img, (new_w, new_h), interpolation=cv.INTER_LINEAR)
-    return resized
+    return cv.resize(template_img, (new_w, new_h), interpolation=cv.INTER_LINEAR)
 
 
 def load_crown_templates():
@@ -71,7 +69,7 @@ def load_crown_templates():
         image = safe_imread(path)
 
         if image is None:
-            print(f"Kunde ikke læse template: {path}")
+            print(f"Kunne ikke læse template: {path}")
             continue
 
         processed = preprocess_for_crowns(image)
@@ -87,11 +85,8 @@ def load_crown_templates():
             print(f"Springer meget lille template over: {file_name}")
             continue
 
-        print(f"{file_name}: resized to {new_w}x{new_h}")
-
         for angle in rotation_angles:
             rotated = rotate_image(processed, angle)
-
             templates.append({
                 "name": f"{file_name}_rot{angle}",
                 "image": rotated
@@ -99,6 +94,9 @@ def load_crown_templates():
 
     print(f"Loaded {len(templates)} crown template variants")
     return templates
+
+
+CROWN_TEMPLATES = load_crown_templates()
 
 
 def compute_iou(box1, box2):
@@ -129,10 +127,11 @@ def center_distance(det1, det2):
     cy1 = det1["y"] + det1["h"] / 2
     cx2 = det2["x"] + det2["w"] / 2
     cy2 = det2["y"] + det2["h"] / 2
+
     return ((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2) ** 0.5
 
 
-def non_max_suppression(detections, iou_threshold=0.20, min_center_distance=12):
+def non_max_suppression(detections, iou_threshold=0.20, min_center_distance=10):
     if not detections:
         return []
 
@@ -158,167 +157,23 @@ def non_max_suppression(detections, iou_threshold=0.20, min_center_distance=12):
     return kept
 
 
-CROWN_TEMPLATES = load_crown_templates()
-
-
-def detect_crowns_in_tile(
-    tile,
-    threshold=0.85,
-    iou_threshold=0.20,
-    min_center_distance=12,
-    debug=False
-):
-    if not CROWN_TEMPLATES:
-        return []
-
-    tile_crop = crop_tile_center(tile, margin_ratio=0.06)
-    tile_processed = preprocess_for_crowns(tile_crop)
-
-    detections = []
-    best_score_seen = -1.0
-
-    scales = [0.75, 0.9, 1.0, 1.1, 1.25]
-
-    for template in CROWN_TEMPLATES:
-        base_template = template["image"]
-
-        for scale in scales:
-            template_img = resize_template(base_template, scale)
-            th, tw = template_img.shape[:2]
-
-            if tile_processed.shape[0] < th or tile_processed.shape[1] < tw:
-                continue
-
-            result = cv.matchTemplate(tile_processed, template_img, cv.TM_CCOEFF_NORMED)
-            max_score = float(result.max())
-
-            if max_score > best_score_seen:
-                best_score_seen = max_score
-
-            y_coords, x_coords = np.where(result >= threshold)
-
-            for x, y in zip(x_coords, y_coords):
-                score = float(result[y, x])
-
-                detections.append({
-                    "x": int(x),
-                    "y": int(y),
-                    "w": int(tw),
-                    "h": int(th),
-                    "score": score,
-                    "template_name": template["name"],
-                    "scale": scale
-                })
-
-    filtered = non_max_suppression(
-        detections,
-        iou_threshold=iou_threshold,
-        min_center_distance=min_center_distance
-    )
-
-    if debug:
-        print(
-            f"Best score: {best_score_seen:.3f} | "
-            f"Raw detections: {len(detections)} | "
-            f"Filtered: {len(filtered)}"
-        )
-
-    return filtered
-
-
-def get_terrain_adjusted_strong_threshold(terrain, base_threshold=0.90):
-    """
-    Terrain-aware tuning.
-    Mine og Swamp laver ofte mere visuelt rod, så de får en lidt højere threshold.
-    """
-    if terrain in ["Mine", "Swamp"]:
-        return base_threshold + 0.03
-    return base_threshold
-
-
-def predict_crown_count(
-    tile,
-    terrain_label=None,
-    threshold=0.85,
-    iou_threshold=0.20,
-    min_center_distance=12,
-    strong_score_threshold=0.90,
-    max_crowns=3,
-    debug=False
-):
-    if terrain_label in ["Home", "Empty"]:
-        if debug:
-            print(f"Terrain {terrain_label} -> forced crowns = 0")
-        return 0
-
-    adjusted_strong_threshold = get_terrain_adjusted_strong_threshold(
-        terrain_label,
-        base_threshold=strong_score_threshold
-    )
-
-    detections = detect_crowns_in_tile(
-        tile=tile,
-        threshold=threshold,
-        iou_threshold=iou_threshold,
-        min_center_distance=min_center_distance,
-        debug=debug
-    )
-
-    blob_count = estimate_crown_blobs(tile, debug=debug)
-
-    if not detections:
-        if debug:
-            print("No detections -> crowns = 0")
-        return 0
-
-    detections = sorted(detections, key=lambda d: d["score"], reverse=True)
-    best_score = detections[0]["score"]
-
-    if best_score < adjusted_strong_threshold:
-        if debug:
-            print(
-                f"Best score: {best_score:.3f} < adjusted strong threshold "
-                f"{adjusted_strong_threshold:.3f}"
-            )
-            print("Predicted crowns: 0")
-        return 0
-
-    strong_detections = [
-        d for d in detections
-        if d["score"] >= adjusted_strong_threshold
-    ]
-
-    template_count = min(len(strong_detections), max_crowns)
-
-    # kombiner template count og blob count
-    if blob_count == 0:
-        crown_count = 0
-    elif template_count == 0:
-        crown_count = 0
-    else:
-        crown_count = min(template_count, blob_count, max_crowns)
-
-    if debug:
-        print(f"Terrain: {terrain_label}")
-        print(f"Best score: {best_score:.3f}")
-        print(f"Adjusted strong threshold: {adjusted_strong_threshold:.3f}")
-        print(f"Strong detections: {len(strong_detections)}")
-        print(f"Template count: {template_count}")
-        print(f"Blob count: {blob_count}")
-        print(f"Predicted crowns: {crown_count}")
-
-    return crown_count
-
-def estimate_crown_blobs(tile, debug=False):
-    """
-    Estimerer hvor mange crown-lignende blobs der findes i tilet.
-    Returnerer et groft count signal.
-    """
+def estimate_yellow_ratio(tile):
     tile_crop = crop_tile_center(tile, margin_ratio=0.06)
     hsv = cv.cvtColor(tile_crop, cv.COLOR_BGR2HSV)
 
-    lower_yellow = np.array([15, 70, 90])
-    upper_yellow = np.array([40, 255, 255])
+    lower_yellow = np.array([15, 55, 75])
+    upper_yellow = np.array([45, 255, 255])
+
+    mask = cv.inRange(hsv, lower_yellow, upper_yellow)
+    return float(mask.mean() / 255.0)
+
+
+def estimate_crown_blobs(tile, debug=False):
+    tile_crop = crop_tile_center(tile, margin_ratio=0.06)
+    hsv = cv.cvtColor(tile_crop, cv.COLOR_BGR2HSV)
+
+    lower_yellow = np.array([15, 55, 75])
+    upper_yellow = np.array([45, 255, 255])
 
     mask = cv.inRange(hsv, lower_yellow, upper_yellow)
 
@@ -333,14 +188,13 @@ def estimate_crown_blobs(tile, debug=False):
     for contour in contours:
         area = cv.contourArea(contour)
 
-        if area < 8 or area > 250:
+        if area < 6 or area > 280:
             continue
 
         x, y, w, h = cv.boundingRect(contour)
-
         aspect_ratio = w / h if h > 0 else 0
 
-        if aspect_ratio < 0.4 or aspect_ratio > 2.5:
+        if aspect_ratio < 0.35 or aspect_ratio > 2.8:
             continue
 
         valid_blobs.append((x, y, w, h, area))
@@ -348,23 +202,172 @@ def estimate_crown_blobs(tile, debug=False):
     blob_count = min(len(valid_blobs), 3)
 
     if debug:
-        print(f"Estimated crown blobs: {blob_count}")
+        print(f"Yellow blobs: {blob_count}")
 
     return blob_count
+
+
+def get_terrain_adjusted_thresholds(
+    terrain,
+    threshold=0.85,
+    strong_score_threshold=0.90
+):
+    if terrain in ["Home", "Empty"]:
+        return 1.0, 1.0
+
+    if terrain in ["Mine", "Swamp"]:
+        return threshold + 0.03, strong_score_threshold + 0.03
+
+    return threshold, strong_score_threshold
+
+
+def detect_crowns_in_tile(
+    tile,
+    threshold=0.85,
+    iou_threshold=0.20,
+    min_center_distance=10,
+    debug=False
+):
+    if not CROWN_TEMPLATES:
+        return []
+
+    tile_crop = crop_tile_center(tile, margin_ratio=0.06)
+    tile_processed = preprocess_for_crowns(tile_crop)
+
+    detections = []
+    best_score_seen = -1.0
+
+    scales = [0.75, 0.90, 1.0, 1.10, 1.25]
+
+    for template in CROWN_TEMPLATES:
+        base_template = template["image"]
+
+        for scale in scales:
+            template_img = resize_template(base_template, scale)
+            th, tw = template_img.shape[:2]
+
+            if tile_processed.shape[0] < th or tile_processed.shape[1] < tw:
+                continue
+
+            result = cv.matchTemplate(tile_processed, template_img, cv.TM_CCOEFF_NORMED)
+            max_score = float(result.max())
+            best_score_seen = max(best_score_seen, max_score)
+
+            y_coords, x_coords = np.where(result >= threshold)
+
+            for x, y in zip(x_coords, y_coords):
+                detections.append({
+                    "x": int(x),
+                    "y": int(y),
+                    "w": int(tw),
+                    "h": int(th),
+                    "score": float(result[y, x]),
+                    "template_name": template["name"],
+                    "scale": scale
+                })
+
+    filtered = non_max_suppression(
+        detections,
+        iou_threshold=iou_threshold,
+        min_center_distance=min_center_distance
+    )
+
+    if debug:
+        print(
+            f"Best score: {best_score_seen:.3f} | "
+            f"Raw: {len(detections)} | "
+            f"Filtered: {len(filtered)}"
+        )
+
+    return filtered
+
+
+def predict_crown_count(
+    tile,
+    terrain_label=None,
+    threshold=0.85,
+    iou_threshold=0.20,
+    min_center_distance=10,
+    strong_score_threshold=0.90,
+    max_crowns=3,
+    debug=False
+):
+    if terrain_label in ["Home", "Empty"]:
+        return 0
+
+    yellow_ratio = estimate_yellow_ratio(tile)
+
+    # Hvis der næsten ingen gul crown-farve er, er det næsten sikkert 0.
+    # Men thresholden er lav, så vi ikke dræber rigtige crowns for hårdt.
+    if yellow_ratio < 0.002:
+        if debug:
+            print(f"Yellow ratio too low: {yellow_ratio:.4f} -> 0")
+        return 0
+
+    adjusted_threshold, adjusted_strong_threshold = get_terrain_adjusted_thresholds(
+        terrain_label,
+        threshold=threshold,
+        strong_score_threshold=strong_score_threshold
+    )
+
+    detections = detect_crowns_in_tile(
+        tile=tile,
+        threshold=adjusted_threshold,
+        iou_threshold=iou_threshold,
+        min_center_distance=min_center_distance,
+        debug=debug
+    )
+
+    blob_count = estimate_crown_blobs(tile, debug=debug)
+
+    if not detections:
+        return 0
+
+    detections = sorted(detections, key=lambda d: d["score"], reverse=True)
+    best_score = detections[0]["score"]
+
+    strong_detections = [
+        d for d in detections
+        if d["score"] >= adjusted_strong_threshold
+    ]
+
+    template_count = min(len(strong_detections), max_crowns)
+
+    # Ny mere konservativ kombination:
+    # Template er primært signal.
+    # Blob count bruges til at stoppe åbenlyse overcounts.
+    if template_count == 0:
+        crown_count = 0
+    elif blob_count == 0 and best_score < adjusted_strong_threshold + 0.05:
+        crown_count = 0
+    elif blob_count > 0:
+        crown_count = min(template_count, max(blob_count, 1), max_crowns)
+    else:
+        crown_count = min(template_count, max_crowns)
+
+    if debug:
+        print(f"Terrain: {terrain_label}")
+        print(f"Yellow ratio: {yellow_ratio:.4f}")
+        print(f"Adjusted threshold: {adjusted_threshold:.3f}")
+        print(f"Adjusted strong threshold: {adjusted_strong_threshold:.3f}")
+        print(f"Best score: {best_score:.3f}")
+        print(f"Template count: {template_count}")
+        print(f"Blob count: {blob_count}")
+        print(f"Predicted crowns: {crown_count}")
+
+    return crown_count
+
+
 def build_crown_grid(
     tiles,
     terrain_grid=None,
     threshold=0.85,
     iou_threshold=0.20,
-    min_center_distance=12,
+    min_center_distance=10,
     strong_score_threshold=0.90,
     max_crowns=3,
     debug=False
 ):
-    """
-    Bygger et 5x5 crown grid ud fra tiles.
-    Hvis terrain_grid gives, bruges terrain-aware crown detection.
-    """
     crown_grid = []
 
     for row_index, row in enumerate(tiles):
@@ -372,11 +375,9 @@ def build_crown_grid(
 
         for col_index, tile in enumerate(row):
             terrain_label = None
+
             if terrain_grid is not None:
                 terrain_label = terrain_grid[row_index][col_index]
-
-            if debug:
-                print(f"\nTile ({row_index}, {col_index}) terrain={terrain_label}")
 
             crown_count = predict_crown_count(
                 tile=tile,
@@ -388,6 +389,7 @@ def build_crown_grid(
                 max_crowns=max_crowns,
                 debug=debug
             )
+
             crown_row.append(crown_count)
 
         crown_grid.append(crown_row)
