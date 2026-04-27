@@ -224,7 +224,7 @@ def build_terrain_grid(
         for tile in row:
             terrain_type = get_terrain_without_home(tile, debug=debug)
             template_score = get_home_score(tile, debug=False)
-            hsv_distance = get_home_hsv_distance(tile, debug=False)
+            hsv_distance = get_home_hsv_distance(tile)
 
             combined_score = (
                 template_weight * template_score
