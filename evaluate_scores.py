@@ -51,7 +51,7 @@ def get_image_files(dataset_folder):
     return image_files
 
 
-def split_dataset(image_files, train_ratio=0.8, seed=42):
+def split_dataset(image_files, train_ratio=0.8, seed=67):
     shuffled = image_files.copy()
     random.seed(seed)
     random.shuffle(shuffled)
@@ -264,7 +264,7 @@ def visualize_score_boards(results, board_size=500, grid_size=5):
 
 def evaluate_scores_svm_terrain_knn_crowns(
     train_ratio=0.8,
-    seed=42,
+    seed=67,
     k=1,
     visualize=True,
     zero_crowns_count_as_one=False
