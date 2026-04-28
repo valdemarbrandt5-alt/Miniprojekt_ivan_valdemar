@@ -1,14 +1,31 @@
 import os
 import random
+from collections import defaultdict
 
 import cv2 as cv
+import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
+try:
+    import pandas as pd
+except (ModuleNotFoundError, ImportError):
+    pd = None
+
+try:
+    from sklearn.metrics import f1_score, classification_report
+except (ModuleNotFoundError, ImportError):
+    f1_score = None
+    classification_report = None
+
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
+
 from ground_truth_progress import GROUND_TRUTH
-from image_processing import get_tiles, predict_terrain_grid_from_image
-from crown_knn_detection import build_crown_knn_database
-from crown_hybrid_detection import build_crown_grid_hybrid
+from image_processing import get_tiles
+from evaluate_svm import build_dataset, get_tile_features
+from crown_knn_detection import build_crown_knn_database, build_crown_grid_knn
 from kingdomino_pointmodel import calculate_board_score
 
 
@@ -21,8 +38,8 @@ def get_image_files(dataset_folder):
     valid_extensions = (".jpg", ".jpeg", ".png", ".bmp")
 
     image_files = [
-        f for f in os.listdir(dataset_folder)
-        if f.lower().endswith(valid_extensions)
+        file_name for file_name in os.listdir(dataset_folder)
+        if file_name.lower().endswith(valid_extensions)
     ]
 
     image_files.sort(
@@ -45,6 +62,109 @@ def split_dataset(image_files, train_ratio=0.8, seed=42):
     test_files = shuffled[split_index:]
 
     return train_files, test_files
+
+
+def train_terrain_svm(train_files):
+    print("\nBygger SVM terrain train dataset...")
+    X_train, y_train = build_dataset(train_files)
+
+    if len(X_train) == 0:
+        raise ValueError("Ingen SVM train data fundet.")
+
+    print(f"SVM train samples: {len(X_train)}")
+    print(f"Features pr tile: {X_train.shape[1]}")
+
+    terrain_model = make_pipeline(
+        StandardScaler(),
+        SVC(
+            kernel="rbf",
+            C=10,
+            gamma="scale"
+        )
+    )
+
+    print("Træner SVM terrain model...")
+    terrain_model.fit(X_train, y_train)
+
+    return terrain_model
+
+
+def predict_terrain_grid_svm(tiles, terrain_model):
+    terrain_grid = []
+
+    for row in range(GRID_SIZE):
+        terrain_row = []
+
+        for col in range(GRID_SIZE):
+            tile = tiles[row][col]
+            features = np.array(get_tile_features(tile)).reshape(1, -1)
+            prediction = terrain_model.predict(features)[0]
+            terrain_row.append(prediction)
+
+        terrain_grid.append(terrain_row)
+
+    return terrain_grid
+
+
+def compare_crown_grids(predicted_grid, true_grid, confusion):
+    correct = 0
+    total = 0
+
+    for row in range(GRID_SIZE):
+        for col in range(GRID_SIZE):
+            predicted = predicted_grid[row][col]
+            truth = true_grid[row][col]
+
+            confusion[truth][predicted] += 1
+            total += 1
+
+            if predicted == truth:
+                correct += 1
+
+    return correct, total
+
+
+def compare_terrain_grids(predicted_grid, true_grid, confusion):
+    correct = 0
+    total = 0
+
+    for row in range(GRID_SIZE):
+        for col in range(GRID_SIZE):
+            predicted = predicted_grid[row][col]
+            truth = true_grid[row][col]
+
+            confusion[truth][predicted] += 1
+            total += 1
+
+            if predicted == truth:
+                correct += 1
+
+    return correct, total
+
+
+def print_confusion_matrix(confusion, labels, title):
+    matrix = []
+
+    for true_label in labels:
+        row = []
+        for pred_label in labels:
+            row.append(confusion[true_label].get(pred_label, 0))
+        matrix.append(row)
+
+    print("\n" + "=" * 70)
+    print(title)
+    print("=" * 70)
+
+    if pd is not None:
+        df = pd.DataFrame(matrix, index=labels, columns=labels)
+        print(df)
+    else:
+        header = "true\\pred".ljust(12) + " ".join(str(label).ljust(10) for label in labels)
+        print(header)
+
+        for true_label, row in zip(labels, matrix):
+            row_text = " ".join(str(value).ljust(10) for value in row)
+            print(str(true_label).ljust(12) + row_text)
 
 
 def visualize_score_boards(results, board_size=500, grid_size=5):
@@ -74,6 +194,9 @@ def visualize_score_boards(results, board_size=500, grid_size=5):
         predicted_crowns = result["predicted_crowns"]
         true_crowns = result["true_crowns"]
 
+        predicted_terrain = result["predicted_terrain"]
+        true_terrain = result["true_terrain"]
+
         predicted_score = result["predicted_score"]
         true_score = result["true_score"]
         score_error = result["score_error"]
@@ -94,10 +217,18 @@ def visualize_score_boards(results, board_size=500, grid_size=5):
                 x = col * tile_size
                 y = row * tile_size
 
-                predicted = predicted_crowns[row][col]
-                truth = true_crowns[row][col]
+                crown_pred = predicted_crowns[row][col]
+                crown_true = true_crowns[row][col]
 
-                edge_color = "lime" if predicted == truth else "red"
+                terrain_pred = predicted_terrain[row][col]
+                terrain_true = true_terrain[row][col]
+
+                is_correct = (
+                    crown_pred == crown_true
+                    and terrain_pred == terrain_true
+                )
+
+                edge_color = "lime" if is_correct else "red"
 
                 rect = patches.Rectangle(
                     (x, y),
@@ -109,12 +240,17 @@ def visualize_score_boards(results, board_size=500, grid_size=5):
                 )
                 ax.add_patch(rect)
 
+                text = (
+                    f"C P:{crown_pred} T:{crown_true}\n"
+                    f"{terrain_pred}"
+                )
+
                 ax.text(
                     x + 4,
                     y + 18,
-                    f"P:{predicted} T:{truth}",
+                    text,
                     color="white",
-                    fontsize=8,
+                    fontsize=7,
                     weight="bold",
                     bbox=dict(facecolor="black", alpha=0.65, pad=2)
                 )
@@ -126,10 +262,9 @@ def visualize_score_boards(results, board_size=500, grid_size=5):
     plt.show()
 
 
-def evaluate_scores(
+def evaluate_scores_svm_terrain_knn_crowns(
     train_ratio=0.8,
     seed=42,
-    evaluate_on_test_only=True,
     k=1,
     visualize=True,
     zero_crowns_count_as_one=False
@@ -151,7 +286,7 @@ def evaluate_scores(
     )
 
     print("=" * 70)
-    print("Evaluering af Kingdomino pointmodel")
+    print("Evaluering af pointmodel med SVM terrain + KNN crowns")
     print("=" * 70)
     print(f"Seed: {seed}")
     print(f"K: {k}")
@@ -159,27 +294,35 @@ def evaluate_scores(
     print(f"Test boards: {len(test_files)}")
     print(f"Zero crowns count as one: {zero_crowns_count_as_one}")
 
-    print("\nBygger KNN crown database...")
+    terrain_model = train_terrain_svm(train_files)
+
+    print("\nBygger KNN crown database fra train split...")
     database_features, database_labels = build_crown_knn_database(train_files)
 
     if len(database_labels) == 0:
         print("KNN databasen er tom.")
         return
 
-    if evaluate_on_test_only:
-        files_to_evaluate = test_files
-        print("Evaluerer kun på test split")
-    else:
-        files_to_evaluate = image_files
-        print("Evaluerer på hele datasættet")
-
-    total_absolute_error = 0
     total_boards = 0
+
+    total_score_error = 0
     perfect_scores = 0
+
+    total_crown_correct = 0
+    total_crown_tiles = 0
+
+    total_terrain_correct = 0
+    total_terrain_tiles = 0
+
+    all_true_crowns = []
+    all_predicted_crowns = []
+
+    crown_confusion = defaultdict(lambda: defaultdict(int))
+    terrain_confusion = defaultdict(lambda: defaultdict(int))
 
     results = []
 
-    for file_name in files_to_evaluate:
+    for file_name in test_files:
         board_name = os.path.splitext(file_name)[0]
 
         if board_name not in GROUND_TRUTH:
@@ -199,41 +342,28 @@ def evaluate_scores(
             grid_size=GRID_SIZE
         )
 
-        predicted_terrain_grid = predict_terrain_grid_from_image(
-            image=image,
-            board_size=BOARD_SIZE,
-            grid_size=GRID_SIZE,
-            debug=False,
-            home_template_threshold=0.80,
-            home_hsv_max_distance=3.0,
-            template_weight=1.0,
-            hsv_weight=0.15
+        predicted_terrain_grid = predict_terrain_grid_svm(
+            tiles,
+            terrain_model
         )
 
-        predicted_crown_grid = build_crown_grid_hybrid(
-            tiles=tiles,
-            database_features=database_features,
-            database_labels=database_labels,
-            terrain_grid=predicted_terrain_grid,
-            k=k,
-            template_threshold=0.85,
-            strong_score_threshold=0.90,
-            iou_threshold=0.20,
-            min_center_distance=10,
-            max_crowns=3,
-            debug=False
+        predicted_crown_grid = build_crown_grid_knn(
+            tiles,
+            database_features,
+            database_labels,
+            k=k
         )
 
         true_terrain_grid = GROUND_TRUTH[board_name]["terrain"]
         true_crown_grid = GROUND_TRUTH[board_name]["crowns"]
 
-        predicted_score, predicted_breakdown = calculate_board_score(
+        predicted_score, _ = calculate_board_score(
             predicted_terrain_grid,
             predicted_crown_grid,
             zero_crowns_count_as_one=zero_crowns_count_as_one
         )
 
-        true_score, true_breakdown = calculate_board_score(
+        true_score, _ = calculate_board_score(
             true_terrain_grid,
             true_crown_grid,
             zero_crowns_count_as_one=zero_crowns_count_as_one
@@ -241,7 +371,30 @@ def evaluate_scores(
 
         score_error = abs(predicted_score - true_score)
 
-        total_absolute_error += score_error
+        terrain_correct, terrain_total = compare_terrain_grids(
+            predicted_terrain_grid,
+            true_terrain_grid,
+            terrain_confusion
+        )
+
+        crown_correct, crown_total = compare_crown_grids(
+            predicted_crown_grid,
+            true_crown_grid,
+            crown_confusion
+        )
+
+        for row in range(GRID_SIZE):
+            for col in range(GRID_SIZE):
+                all_true_crowns.append(true_crown_grid[row][col])
+                all_predicted_crowns.append(predicted_crown_grid[row][col])
+
+        total_terrain_correct += terrain_correct
+        total_terrain_tiles += terrain_total
+
+        total_crown_correct += crown_correct
+        total_crown_tiles += crown_total
+
+        total_score_error += score_error
         total_boards += 1
 
         if score_error == 0:
@@ -251,8 +404,8 @@ def evaluate_scores(
             "board_name": board_name,
             "image": image.copy(),
             "predicted_terrain": predicted_terrain_grid,
-            "predicted_crowns": predicted_crown_grid,
             "true_terrain": true_terrain_grid,
+            "predicted_crowns": predicted_crown_grid,
             "true_crowns": true_crown_grid,
             "predicted_score": predicted_score,
             "true_score": true_score,
@@ -262,24 +415,95 @@ def evaluate_scores(
         print("\n" + "=" * 70)
         print(f"Board {board_name}")
         print("=" * 70)
-        print(f"True score:      {true_score}")
-        print(f"Predicted score: {predicted_score}")
-        print(f"Error:           {score_error}")
+        print(f"Terrain accuracy: {terrain_correct}/{terrain_total} = {terrain_correct / terrain_total:.2%}")
+        print(f"Crown accuracy:   {crown_correct}/{crown_total} = {crown_correct / crown_total:.2%}")
+        print(f"True score:       {true_score}")
+        print(f"Predicted score:  {predicted_score}")
+        print(f"Score error:      {score_error}")
 
     if total_boards == 0:
         print("Ingen boards evalueret.")
         return
 
-    mean_absolute_error = total_absolute_error / total_boards
-    perfect_score_accuracy = perfect_scores / total_boards
+    terrain_accuracy = total_terrain_correct / total_terrain_tiles
+    crown_accuracy = total_crown_correct / total_crown_tiles
+
+    exact_score_accuracy = perfect_scores / total_boards
+    mean_absolute_score_error = total_score_error / total_boards
 
     print("\n" + "=" * 70)
-    print("Samlet score evaluering")
+    print("Samlet evaluering")
     print("=" * 70)
     print(f"Boards evalueret: {total_boards}")
-    print(f"Perfekte scores: {perfect_scores}/{total_boards}")
-    print(f"Score accuracy: {perfect_score_accuracy:.2%}")
-    print(f"Mean absolute error: {mean_absolute_error:.2f}")
+    print(f"Terrain accuracy: {terrain_accuracy:.2%}")
+    print(f"Crown accuracy:   {crown_accuracy:.2%}")
+    print(f"Perfekte scores:  {perfect_scores}/{total_boards}")
+    print(f"Exact score accuracy: {exact_score_accuracy:.2%}")
+    print(f"Mean absolute score error: {mean_absolute_score_error:.2f}")
+
+    if f1_score is not None:
+        micro_f1 = f1_score(
+            all_true_crowns,
+            all_predicted_crowns,
+            labels=[0, 1, 2, 3],
+            average="micro",
+            zero_division=0
+        )
+
+        macro_f1 = f1_score(
+            all_true_crowns,
+            all_predicted_crowns,
+            labels=[0, 1, 2, 3],
+            average="macro",
+            zero_division=0
+        )
+
+        weighted_f1 = f1_score(
+            all_true_crowns,
+            all_predicted_crowns,
+            labels=[0, 1, 2, 3],
+            average="weighted",
+            zero_division=0
+        )
+
+        print("\n" + "=" * 70)
+        print("Crown F1 scores")
+        print("=" * 70)
+        print(f"Micro F1:    {micro_f1:.4f}")
+        print(f"Macro F1:    {macro_f1:.4f}")
+        print(f"Weighted F1: {weighted_f1:.4f}")
+
+        print("\nClassification report:")
+        print(
+            classification_report(
+                all_true_crowns,
+                all_predicted_crowns,
+                labels=[0, 1, 2, 3],
+                zero_division=0
+            )
+        )
+    else:
+        print("\nsklearn metrics kunne ikke importeres.")
+        print("Installer med: pip install scikit-learn")
+
+    terrain_labels = sorted(
+        set(terrain_confusion.keys()) |
+        {pred for row in terrain_confusion.values() for pred in row.keys()}
+    )
+
+    crown_labels = [0, 1, 2, 3]
+
+    print_confusion_matrix(
+        terrain_confusion,
+        terrain_labels,
+        "Terrain confusion matrix"
+    )
+
+    print_confusion_matrix(
+        crown_confusion,
+        crown_labels,
+        "Crown confusion matrix"
+    )
 
     if visualize:
         visualize_score_boards(
@@ -290,17 +514,10 @@ def evaluate_scores(
 
 
 if __name__ == "__main__":
-    evaluate_scores(
+    evaluate_scores_svm_terrain_knn_crowns(
         train_ratio=0.8,
-        seed=42,
-        evaluate_on_test_only=True,
+        seed=67,
         k=1,
         visualize=True,
-
-        # Rigtige Kingdomino regler:
-        # Områder med 0 kroner giver 0 point.
         zero_crowns_count_as_one=False
-
-        # Hvis I absolut vil have 0 kroner til at tælle som 1:
-        # zero_crowns_count_as_one=True
     )

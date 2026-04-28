@@ -229,5 +229,5 @@ def evaluate_svm(train_ratio=0.8, seed=42):
 if __name__ == "__main__":
     evaluate_svm(
         train_ratio=0.8,
-        seed=42
+        seed=67
     )

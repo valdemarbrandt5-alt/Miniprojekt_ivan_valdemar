@@ -282,7 +282,7 @@ def evaluate_model(
 if __name__ == "__main__":
     evaluate_model(
         train_ratio=0.8,
-        seed=42,
+        seed=67,
         evaluate_on_test_only=True,
         home_template_threshold=0.80,
         home_hsv_max_distance=3.0,
