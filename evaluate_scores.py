@@ -173,7 +173,7 @@ def visualize_score_boards(results, board_size=500, grid_size=5):
         return
 
     num_boards = len(results)
-    cols = 4
+    cols = 5
     rows = (num_boards + cols - 1) // cols
 
     fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 6 * rows))
